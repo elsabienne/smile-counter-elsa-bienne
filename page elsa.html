@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teachable Machine Smile Counter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        #webcam-container {
+            border: 4px solid #4f46e5;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            border-radius: 1.5rem;
+            overflow: hidden;
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #webcam-container canvas, #webcam-container video {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+        .prediction-box {
+            min-height: 4rem;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8 flex flex-col items-center justify-center min-h-screen">
+
+    <div class="max-w-lg w-full bg-white p-6 sm:p-8 rounded-2xl shadow-xl space-y-6">
+        <h1 class="text-3xl font-extrabold text-center text-indigo-700">Smile Counter 📸</h1>
+        <p class="text-center text-gray-500">
+            Enter your Teachable Machine model link for smiling detection to start the counter. The target label is <strong>"Smiling"</strong>.
+        </p>
+
+        <div class="space-y-3">
+            <input type="url" id="model-url-input" 
+                   placeholder="Enter Model Link here (e.g., .../models/ID/)" 
+                   value="https://teachablemachine.withgoogle.com/models/eS8VoaG2Z/"
+                   class="w-full p-3 border border-gray-300 rounded-xl focus:ring-indigo-500 focus:border-indigo-500 text-gray-700">
+        </div>
+
+        <div id="webcam-container">
+            <p id="webcam-placeholder" class="text-gray-400">Webcam Preview Area</p>
+        </div>
+
+        <div class="space-y-4">
+            <button id="start-button" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-xl transition duration-200 shadow-md disabled:opacity-50">
+                Load Model and Start Detection
+            </button>
+
+            <div class="flex flex-col space-y-4 sm:flex-row sm:space-y-0 sm:space-x-4">
+                
+                <div class="flex-1 bg-gray-50 p-4 rounded-xl border border-gray-200">
+                    <p class="text-sm font-medium text-gray-600">Current Status</p>
+                    <div id="status-message" class="text-lg font-semibold text-gray-800 mt-1 prediction-box">
+                        Enter URL above.
+                    </div>
+                </div>
+
+                <div class="flex-1 bg-indigo-50 p-4 rounded-xl border border-indigo-200">
+                    <p class="text-sm font-medium text-indigo-700">Total Smiles Count</p>
+                    <div id="smile-count" class="text-3xl font-extrabold text-indigo-800 mt-1 prediction-box">
+                        0
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-yellow-50 p-4 rounded-xl border border-yellow-200">
+                <p class="text-sm font-medium text-yellow-700">Prediction</p>
+                <div id="label-result" class="text-xl font-bold text-yellow-800 mt-1">
+                    Waiting for input...
+                </div>
+            </div>
+
+            <!-- NEW BILLING SECTION -->
+            <div class="bg-green-50 p-4 rounded-xl border border-green-200">
+                <p class="text-sm font-medium text-green-700">Billing Calculator</p>
+
+                <label class="block mt-2 text-gray-700 font-medium">Unit Price per Smile (€)</label>
+                <input type="number" id="unit-price" value="1.00" step="0.10"
+                       class="w-full p-2 mt-1 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500">
+
+                <p class="mt-4 text-lg font-semibold text-green-900">
+                    Total Amount: <span id="total-amount">0.00 €</span>
+                </p>
+            </div>
+            <!-- END BILLING SECTION -->
+
+        </div>
+    </div>
+
+    <!-- SCRIPTS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const SMILE_LABEL = "Smiling";
+        const CONFIDENCE_THRESHOLD = 0.90;
+
+        // --- GLOBAL STATE ---
+        let model, webcam, maxPredictions;
+        let smileCount = 0;
+        let wasSmiling = false;
+        let isRunning = false;
+
+        // --- DOM Elements ---
+        const startButton = document.getElementById("start-button");
+        const statusMessage = document.getElementById("status-message");
+        const smileCountDisplay = document.getElementById("smile-count");
+        const labelResultDisplay = document.getElementById("label-result");
+        const modelUrlInput = document.getElementById("model-url-input");
+        const webcamContainer = document.getElementById("webcam-container");
+        const webcamPlaceholder = document.getElementById("webcam-placeholder");
+
+        const unitPriceInput = document.getElementById("unit-price");
+        const totalAmountDisplay = document.getElementById("total-amount");
+
+        function updateTotal() {
+            const price = parseFloat(unitPriceInput.value) || 0;
+            totalAmountDisplay.textContent = (smileCount * price).toFixed(2) + " €";
+        }
+
+        unitPriceInput.addEventListener("input", updateTotal);
+
+        async function init() {
+            startButton.disabled = true;
+            statusMessage.textContent = "Loading model...";
+
+            const URL = modelUrlInput.value.trim();
+            if (!URL) {
+                statusMessage.textContent = "Error: Please enter the Model Link.";
+                startButton.disabled = false;
+                return;
+            }
+
+            while (webcamContainer.firstChild) {
+                webcamContainer.removeChild(webcamContainer.firstChild);
+            }
+
+            try {
+                const modelURL = URL + "model.json";
+                const metadataURL = URL + "metadata.json";
+
+                model = await tmImage.load(modelURL, metadataURL);
+                maxPredictions = model.getTotalClasses();
+
+                webcam = new tmImage.Webcam(400, 400, true);
+                await webcam.setup();
+                await webcam.play();
+
+                webcamContainer.appendChild(webcam.canvas);
+                window.requestAnimationFrame(loop);
+
+                statusMessage.textContent = `Webcam and Model Ready. Counting '${SMILE_LABEL}' started!`;
+                isRunning = true;
+
+                startButton.textContent = "Detection Running";
+                startButton.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                startButton.classList.add('bg-green-600', 'hover:bg-green-700');
+
+            } catch (error) {
+                statusMessage.textContent = `Error loading model: ${error.message}`;
+                webcamContainer.appendChild(webcamPlaceholder);
+                startButton.disabled = false;
+            }
+        }
+
+        function loop() {
+            if (isRunning) {
+                webcam.update();
+                predict();
+                window.requestAnimationFrame(loop);
+            }
+        }
+
+        async function predict() {
+            if (!model || !webcam || !webcam.canvas) return;
+
+            const prediction = await model.predict(webcam.canvas);
+            
+            let best = { className: "Unknown", probability: 0 };
+            prediction.forEach(p => {
+                if (p.probability > best.probability) best = p;
+            });
+
+            labelResultDisplay.textContent = 
+                `${best.className}: ${(best.probability * 100).toFixed(2)}%`;
+
+            const smilingNow = best.className === SMILE_LABEL && best.probability >= CONFIDENCE_THRESHOLD;
+
+            if (smilingNow && !wasSmiling) {
+                smileCount++;
+                smileCountDisplay.textContent = smileCount;
+                updateTotal();
+
+                labelResultDisplay.parentElement.classList.add('bg-pink-100');
+                setTimeout(() => {
+                    labelResultDisplay.parentElement.classList.remove('bg-pink-100');
+                }, 300);
+            }
+
+            wasSmiling = smilingNow;
+        }
+
+        startButton.addEventListener("click", () => {
+            if (!startButton.disabled) init();
+        });
+
+        window.onload = () => {
+            statusMessage.textContent = "Ready. Enter your model link, then click 'Load Model and Start Detection'.";
+            startButton.disabled = false;
+        }
+    </script>
+</body>
+</html>
